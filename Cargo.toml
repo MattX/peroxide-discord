@@ -1,0 +1,11 @@
+[package]
+name = "peroxide-discord"
+version = "0.1.0"
+authors = ["Matthieu Felix <matthieufelix@gmail.com>"]
+edition = "2018"
+
+[dependencies]
+lazy_static = "1.4.0"
+peroxide = { path = "../peroxide/" }
+regex = "1"
+serenity = "0.8.0"
