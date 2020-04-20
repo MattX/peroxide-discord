@@ -55,8 +55,8 @@ impl EventHandler for Handler {
     // events can be dispatched simultaneously.
     fn message(&self, ctx: Context, msg: Message) {
         lazy_static! {
-            static ref CB_CMD_RE: Regex = Regex::new(r"(?s)\A¡cl\s+```scheme\s+(.*)```\z").unwrap();
-            static ref CMD_RE: Regex = Regex::new(r"(?s)\A¡cl\s+(.*)\z").unwrap();
+            static ref CB_CMD_RE: Regex = Regex::new(r"(?s)\A(?:¡cl|oo)\s+```scheme\s+(.*)```\z").unwrap();
+            static ref CMD_RE: Regex = Regex::new(r"(?s)\A(?:¡cl|oo)\s+(.*)\z").unwrap();
             static ref START_OF_LINE: Regex = Regex::new(r"(?m)^").unwrap();
         }
 
@@ -64,7 +64,18 @@ impl EventHandler for Handler {
             return;
         }
         let trimmed_content = msg.content.trim();
+
         println!("got message [{}]", trimmed_content);
+
+        if trimmed_content == "¡source" {
+            if let Err(why) = msg.channel_id.say(&ctx.http,
+            "peroxide interpreter: https://github.com/MattX/peroxide\n\
+            discord bot: https://github.com/MattX/peroxide-discord") {
+                println!("Error sending message: {:?}", why);
+            }
+            return
+        }
+
         let command = match CB_CMD_RE
             .captures(trimmed_content)
             .or_else(|| CMD_RE.captures(trimmed_content))
