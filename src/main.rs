@@ -5,6 +5,8 @@ use std::{env, thread};
 
 use peroxide::Interpreter;
 use regex::Regex;
+use serenity::async_trait;
+use serenity::client::ClientBuilder;
 use serenity::{
     model::{channel::Message, gateway::Ready},
     prelude::*,
@@ -13,6 +15,8 @@ use std::sync::mpsc;
 use std::sync::mpsc::SyncSender;
 use std::time::Duration;
 
+/// Datatype we send to the interpreter: the command + a channel to write
+/// the result in.
 type BackAndForth = (String, SyncSender<Result<String, String>>);
 
 struct InterruptingInterpreter {
@@ -39,7 +43,8 @@ impl InterruptingInterpreter {
             }
         });
         let result = self.interpreter.parse_compile_run(read);
-        send.send(());
+        send.send(())
+            .map_err(|e| format!("error sending res: {:?}", e))?;
         interruptor_thread.join().unwrap();
         result.map(|p| p.pp().pretty_print())
     }
@@ -47,20 +52,22 @@ impl InterruptingInterpreter {
 
 struct Handler;
 
+#[async_trait]
 impl EventHandler for Handler {
     // Set a handler for the `message` event - so that whenever a new message
     // is received - the closure (or function) passed will be called.
     //
     // Event handlers are dispatched through a threadpool, and so multiple
     // events can be dispatched simultaneously.
-    fn message(&self, ctx: Context, msg: Message) {
+    async fn message(&self, ctx: Context, msg: Message) {
         lazy_static! {
-            static ref CB_CMD_RE: Regex = Regex::new(r"(?s)\A(?:¡cl|oo)\s+```scheme\s+(.*)```\z").unwrap();
+            static ref CB_CMD_RE: Regex =
+                Regex::new(r"(?s)\A(?:¡cl|oo)\s+```scheme\s+(.*)```\z").unwrap();
             static ref CMD_RE: Regex = Regex::new(r"(?s)\A(?:¡cl|oo)\s+(.*)\z").unwrap();
             static ref START_OF_LINE: Regex = Regex::new(r"(?m)^").unwrap();
         }
 
-        if msg.channel_id.name(ctx.cache) != Some("lisp".into()) || msg.author.bot {
+        if msg.channel_id.name(ctx.cache).await != Some("lisp".into()) || msg.author.bot {
             return;
         }
         let trimmed_content = msg.content.trim();
@@ -68,12 +75,18 @@ impl EventHandler for Handler {
         println!("got message [{}]", trimmed_content);
 
         if trimmed_content == "¡source" {
-            if let Err(why) = msg.channel_id.say(&ctx.http,
-            "peroxide interpreter: https://github.com/MattX/peroxide\n\
-            discord bot: https://github.com/MattX/peroxide-discord") {
+            if let Err(why) = msg
+                .channel_id
+                .say(
+                    &ctx.http,
+                    "peroxide interpreter: https://github.com/MattX/peroxide\n\
+            discord bot: https://github.com/MattX/peroxide-discord",
+                )
+                .await
+            {
                 println!("Error sending message: {:?}", why);
             }
-            return
+            return;
         }
 
         let command = match CB_CMD_RE
@@ -86,18 +99,22 @@ impl EventHandler for Handler {
 
         println!("command: [{}]", command);
 
-        let mut data = ctx.data.write();
+        let mut data = ctx.data.write().await;
         let send_channel: &mut Mutex<SyncSender<BackAndForth>> =
             data.get_mut::<SenderContainer>().unwrap();
         let (response_sender, response_receiver) = mpsc::sync_channel(0);
-        let result = match send_channel.try_lock_for(Duration::from_secs(15)) {
-            Some(channel) => {
+        let timing_out = tokio::time::timeout(Duration::from_secs(15), send_channel.lock());
+        let result = match timing_out.await {
+            Ok(channel) => {
                 channel
                     .try_send((command.clone(), response_sender))
                     .unwrap();
-                response_receiver.recv().map_err(|e| e.to_string()).and_then(|r| r)
+                response_receiver
+                    .recv()
+                    .map_err(|e| e.to_string())
+                    .and_then(|r| r)
             }
-            None => Err("timeout waiting for interpreter lock".into()),
+            Err(_) => Err("timeout waiting for interpreter lock".into()),
         };
         println!("Result: {:?}", result);
 
@@ -108,22 +125,18 @@ impl EventHandler for Handler {
         };
 
         let limited_response = response.chars().take(1000).collect::<String>();
-        if let Err(why) = msg.channel_id.say(&ctx.http, limited_response) {
+        if let Err(why) = msg.channel_id.say(&ctx.http, limited_response).await {
             println!("Error sending message: {:?}", why);
         }
     }
 
-    // Set a handler to be called on the `ready` event. This is called when a
-    // shard is booted, and a READY payload is sent by Discord. This payload
-    // contains data like the current user's guild Ids, current user data,
-    // private channels, and more.
-    //
-    // In this case, just print what the current user's username is.
-    fn ready(&self, _: Context, ready: Ready) {
+    async fn ready(&self, _: Context, ready: Ready) {
         println!("{} is connected!", ready.user.name);
     }
 }
 
+/// Serenity uses this weird type-indexed map to store global data.
+/// The only data we have is a channel to send data to the peroxide interpreter.
 struct SenderContainer;
 
 impl TypeMapKey for SenderContainer {
@@ -144,20 +157,18 @@ fn main() {
         }
     });
 
-    // Create a new instance of the Client, logging in as a bot. This will
-    // automatically prepend your bot token with "Bot ", which is a requirement
-    // by Discord for bot users.
-    let mut client = Client::new(&token, Handler).expect("Err creating client");
-    client
-        .data
-        .write()
-        .insert::<SenderContainer>(Mutex::new(send));
+    let mut client = futures::executor::block_on(
+        ClientBuilder::new(&token)
+            .event_handler(Handler)
+            .type_map_insert::<SenderContainer>(Mutex::new(send)),
+    )
+    .expect("Error creating client");
 
-    // Finally, start a single shard, and start listening to events.
+    // Start a single shard, and start listening to events.
     //
     // Shards will automatically attempt to reconnect, and will perform
     // exponential backoff until it reconnects.
-    if let Err(why) = client.start() {
+    if let Err(why) = futures::executor::block_on(client.start()) {
         println!("Client error: {:?}", why);
     }
 }
