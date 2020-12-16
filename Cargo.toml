@@ -5,7 +5,9 @@ authors = ["Matthieu Felix <matthieufelix@gmail.com>"]
 edition = "2018"
 
 [dependencies]
-lazy_static = "1.4.0"
+futures = "0.3"
+lazy_static = "1.4"
 peroxide = { path = "../peroxide/" }
 regex = "1"
-serenity = "0.8.0"
+serenity = "0.9"
+tokio = {version = "0.3", features = ["time"]}
